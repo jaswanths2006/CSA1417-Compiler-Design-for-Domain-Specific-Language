@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Dr. Drive: GTA Edition</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #87CEEB; font-family: 'Courier New', Courier, monospace; }
+        
+        #game-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        
+        /* UI OVERLAY */
+        #ui-layer {
+            position: absolute; bottom: 20px; left: 20px; pointer-events: none;
+            width: 300px; color: white; text-shadow: 2px 2px 0 #000;
+        }
+        
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 10px; font-weight: bold; font-size: 20px; }
+        
+        /* Fuel Bar */
+        .bar-container { width: 100%; height: 20px; background: #333; border: 2px solid white; margin-top: 5px; }
+        #fuel-bar { width: 100%; height: 100%; background: #00ff00; transition: width 0.2s, background 0.2s; }
+
+        /* Camera Box */
+        #cam-box {
+            position: absolute; top: 20px; right: 20px;
+            width: 200px; height: 150px; background: #000;
+            border: 3px solid #ff0055; border-radius: 10px; overflow: hidden;
+            z-index: 100;
+        }
+        #video-feed, #debug-canvas { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            transform: scaleX(-1); 
+        }
+        #video-feed { object-fit: cover; opacity: 0.6; }
+        #debug-canvas { z-index: 10; }
+
+        /* Messages */
+        #msg-overlay {
+            position: absolute; top: 40%; left: 0; width: 100%; text-align: center;
+            font-size: 50px; font-weight: 900; color: red; display: none;
+            text-shadow: 0 0 20px black; pointer-events: none;
+        }
+
+        #start-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95); z-index: 200;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white; text-align: center;
+        }
+        button {
+            padding: 20px 50px; font-size: 24px; background: #ff0055; color: white;
+            border: none; border-radius: 0; cursor: pointer; margin-top: 20px;
+            font-weight: bold; box-shadow: 5px 5px 0px white;
+        }
+        button:hover { margin-top:15px; margin-bottom:5px; box-shadow: 5px 10px 0px white;}
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+<div id="game-container"></div>
+<div id="msg-overlay">WASTED</div>
+
+<div id="ui-layer">
+    <div class="stat-row">
+        <span>SPEED: <span id="speed-val">0</span></span>
+        <span>KILLS: <span id="kill-val" style="color:red">0</span></span>
+    </div>
+    <div>FUEL</div>
+    <div class="bar-container">
+        <div id="fuel-bar"></div>
+    </div>
+    <div id="status-text" style="font-size:14px; margin-top:10px; color:#ffff00;">initializing...</div>
+</div>
+
+<div id="cam-box">
+    <video id="video-feed" playsinline muted></video>
+    <canvas id="debug-canvas"></canvas>
+</div>
+
+<div id="start-screen">
+    <h1 style="font-family:'Impact'; font-size:60px; color:#ff0055; text-shadow: 2px 2px white;">CITY CHAOS</h1>
+    <p>👊 Fist to BRAKE/REVERSE | ✋ Open Hand to GAS</p>
+    <p>🛑 Stop at YELLOW zones to Refuel</p>
+    <button onclick="startGame()">ENTER CITY</button>
+</div>
+
+<script>
+/* ================= GAME VARIABLES ================= */
+let scene, camera, renderer, car;
+let speed = 0, carAngle = 0;
+let fuel = 100;
+let kills = 0;
+let gameActive = false;
+
+// Entities
+let pedestrians = [];
+let buildings = [];
+let fuelStations = [];
+
+let input = { steer: 0, gas: false, brake: false }; 
+
+function init3D() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87CEEB);
+    scene.fog = new THREE.Fog(0x87CEEB, 20, 200);
+
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 5, -10);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.getElementById('game-container').appendChild(renderer.domElement);
+
+    // Lights
+    const ambLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(50, 100, 50);
+    dirLight.castShadow = true;
+    dirLight.shadow.camera.bottom = -100;
+    dirLight.shadow.camera.top = 100;
+    dirLight.shadow.camera.left = -100;
+    dirLight.shadow.camera.right = 100;
+    dirLight.shadow.mapSize.width = 2048; 
+    dirLight.shadow.mapSize.height = 2048;
+    scene.add(dirLight);
+
+    // Ground
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.MeshLambertMaterial({ color: 0x2c3e50 }));
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    createRoad();
+    createCity();
+    createCar();
+
+    animate();
+}
+
+function createRoad() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    
+    // Asphalt
+    ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0,0,512,512); 
+    // Lane Lines
+    ctx.fillStyle = "#FFF"; ctx.fillRect(126, 0, 4, 512); ctx.fillRect(382, 0, 4, 512); 
+    ctx.fillStyle = "#FFD700"; ctx.fillRect(254, 0, 4, 512);
+    
+    // Zebra Crossing (Every ~100m in texture repetition)
+    ctx.fillStyle = "#FFF";
+    for(let i=0; i<10; i++) {
+        ctx.fillRect(50 + (i*45), 400, 30, 80); // Stripes near bottom of texture
+    }
+
+    const roadTex = new THREE.CanvasTexture(canvas);
+    roadTex.wrapT = THREE.RepeatWrapping; roadTex.repeat.set(1, 100);
+    roadTex.anisotropy = 16;
+    
+    const road = new THREE.Mesh(new THREE.PlaneGeometry(40, 5000), new THREE.MeshLambertMaterial({ map: roadTex }));
+    road.rotation.x = -Math.PI/2;
+    road.position.y = 0.1;
+    road.receiveShadow = true;
+    scene.add(road);
+}
+
+function createCity() {
+    // Generate Buildings (Shops) and Fuel Stations along the road
+    const geo = new THREE.BoxGeometry(15, 30, 15);
+    
+    for(let i = -2000; i < 2000; i+=60) {
+        if (Math.random() < 0.3) continue; // Gaps
+
+        // Left Side Building
+        let h = 20 + Math.random() * 40;
+        let mat = new THREE.MeshLambertMaterial({ color: Math.random() * 0xffffff });
+        let b = new THREE.Mesh(new THREE.BoxGeometry(15, h, 15), mat);
+        b.position.set(-35, h/2, i);
+        b.castShadow = true;
+        scene.add(b);
+
+        // Right Side Building
+        h = 20 + Math.random() * 40;
+        let mat2 = new THREE.MeshLambertMaterial({ color: Math.random() * 0xffffff });
+        let b2 = new THREE.Mesh(new THREE.BoxGeometry(15, h, 15), mat2);
+        b2.position.set(35, h/2, i);
+        b2.castShadow = true;
+        scene.add(b2);
+    }
+
+    // Fuel Stations (Yellow Zones) every 600 units
+    const stationGeo = new THREE.BoxGeometry(10, 0.5, 20);
+    const stationMat = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.5 });
+    
+    for(let i = -1800; i < 2000; i+= 600) {
+        let s = new THREE.Mesh(stationGeo, stationMat);
+        s.position.set(25, 0.2, i); // Right side
+        scene.add(s);
+        fuelStations.push(s);
+        
+        // Add "FUEL" Sign
+        let pole = new THREE.Mesh(new THREE.BoxGeometry(1, 10, 1), new THREE.MeshLambertMaterial({color:0x555555}));
+        pole.position.set(25, 5, i);
+        scene.add(pole);
+        let sign = new THREE.Mesh(new THREE.BoxGeometry(8, 4, 1), new THREE.MeshLambertMaterial({color:0xff0000}));
+        sign.position.set(25, 10, i);
+        scene.add(sign);
+    }
+
+    // Pedestrians
+    const pedGeo = new THREE.CylinderGeometry(0.5, 0.5, 2.5, 8);
+    const pedMat = new THREE.MeshLambertMaterial({ color: 0x00ffcc }); // Teal shirts
+    
+    for(let i=0; i<50; i++) {
+        let p = new THREE.Mesh(pedGeo, pedMat);
+        // Random pos on road or sidewalk
+        let px = (Math.random() - 0.5) * 50; 
+        let pz = (Math.random() - 0.5) * 4000;
+        p.position.set(px, 1.25, pz);
+        p.castShadow = true;
+        
+        // Random walking direction
+        p.userData = { 
+            speed: (Math.random() * 0.1) + 0.05, 
+            dir: Math.random() > 0.5 ? 1 : -1,
+            axis: Math.random() > 0.5 ? 'x' : 'z' // Walk across or along road
+        };
+        
+        scene.add(p);
+        pedestrians.push(p);
+    }
+}
+
+function createCar() {
+    car = new THREE.Group();
+    // Body
+    const body = new THREE.Mesh(new THREE.BoxGeometry(2.4, 1.2, 5), new THREE.MeshPhongMaterial({ color: 0xe74c3c }));
+    body.position.y = 1; body.castShadow = true;
+    car.add(body);
+    // Roof
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(2, 0.8, 2.5), new THREE.MeshPhongMaterial({ color: 0x222 }));
+    roof.position.y = 2; roof.castShadow = true;
+    car.add(roof);
+    
+    scene.add(car);
+}
+
+function animate() {
+    requestAnimationFrame(animate);
+    if (!gameActive) return;
+
+    // --- PHYSICS ---
+    if (fuel > 0) {
+        if (input.gas) speed += 0.01;
+        else if (input.brake) speed -= 0.02;
+        else speed *= 0.98;
+    } else {
+        speed *= 0.95; // Out of gas
+    }
+
+    if (speed > 1.2) speed = 1.2;
+    if (speed < -0.4) speed = -0.4;
+    
+    if (Math.abs(speed) > 0.01) carAngle -= input.steer * 0.04;
+
+    car.rotation.y = carAngle;
+    car.position.x += Math.sin(carAngle) * speed;
+    car.position.z += Math.cos(carAngle) * speed;
+
+    // Consumption
+    if (input.gas && Math.abs(speed) > 0.1) fuel -= 0.1;
+
+    // --- LOGIC: Refueling ---
+    let nearStation = false;
+    fuelStations.forEach(s => {
+        // Simple distance check
+        if (car.position.distanceTo(s.position) < 8) {
+            nearStation = true;
+            if (Math.abs(speed) < 0.1) {
+                fuel += 1;
+                if (fuel > 100) fuel = 100;
+            }
+        }
+    });
+
+    // --- LOGIC: Pedestrians ---
+    for (let i = pedestrians.length - 1; i >= 0; i--) {
+        let p = pedestrians[i];
+        
+        // Move
+        if(p.userData.axis === 'x') {
+            p.position.x += p.userData.speed * p.userData.dir;
+            if (p.position.x > 30 || p.position.x < -30) p.userData.dir *= -1;
+        } else {
+            p.position.z += p.userData.speed * p.userData.dir;
+        }
+
+        // Collision Check (Kill)
+        if (car.position.distanceTo(p.position) < 3.5) {
+            // KILL!
+            scene.remove(p);
+            pedestrians.splice(i, 1);
+            kills++;
+            showMessage("SPLAT!");
+            fuel += 5; // Bonus fuel for chaos?
+            
+            // Screen Shake effect
+            camera.position.y += Math.random();
+        }
+    }
+
+    // --- CAMERA ---
+    const relativeOffset = new THREE.Vector3(0, 6, -12);
+    const cameraOffset = relativeOffset.applyMatrix4(car.matrixWorld);
+    camera.position.lerp(cameraOffset, 0.1);
+    camera.lookAt(car.position);
+
+    // --- UI UPDATES ---
+    document.getElementById('speed-val').innerText = Math.floor(Math.abs(speed)*150);
+    document.getElementById('kill-val').innerText = kills;
+    
+    const fb = document.getElementById('fuel-bar');
+    fb.style.width = fuel + "%";
+    fb.style.backgroundColor = fuel < 20 ? "red" : (nearStation ? "yellow" : "#00ff00");
+    
+    if(fuel <= 0 && Math.abs(speed) < 0.01) showMessage("OUT OF FUEL");
+    if(nearStation && fuel < 100) document.getElementById('status-text').innerText = "REFUELING... STOP CAR";
+    else document.getElementById('status-text').innerText = "DRIVE SAFE (OR NOT)";
+}
+
+function showMessage(text) {
+    const msg = document.getElementById('msg-overlay');
+    msg.innerText = text;
+    msg.style.display = 'block';
+    setTimeout(() => { msg.style.display = 'none'; }, 1000);
+}
+
+/* ================= HAND TRACKING ================= */
+const videoElem = document.getElementById('video-feed');
+const canvasElem = document.getElementById('debug-canvas');
+const canvasCtx = canvasElem.getContext('2d');
+
+function onResults(results) {
+    canvasElem.width = videoElem.videoWidth;
+    canvasElem.height = videoElem.videoHeight;
+    canvasCtx.clearRect(0, 0, canvasElem.width, canvasElem.height);
+
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const lm = results.multiHandLandmarks[0];
+        drawConnectors(canvasCtx, lm, HAND_CONNECTIONS, {color: '#00ffcc', lineWidth: 2});
+        drawLandmarks(canvasCtx, lm, {color: '#ff0000', lineWidth: 2});
+
+        const x = lm[0].x;
+        // Steering
+        if (x > 0.6) input.steer = 1;
+        else if (x < 0.4) input.steer = -1;
+        else input.steer = 0;
+
+        // Gas/Brake (Fist)
+        const dist = Math.abs(lm[0].y - lm[12].y);
+        if (dist < 0.15) {
+            input.brake = true; input.gas = false;
+        } else {
+            input.gas = true; input.brake = false;
+        }
+    } else {
+        input.gas = false; input.brake = true;
+    }
+}
+
+const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+hands.setOptions({maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.5});
+hands.onResults(onResults);
+
+function startGame() {
+    document.getElementById('start-screen').style.display = 'none';
+    gameActive = true;
+    init3D();
+    const cam = new Camera(videoElem, {
+        onFrame: async () => { await hands.send({image: videoElem}); },
+        width: 320, height: 240
+    });
+    cam.start();
+}
+</script>
+</body>
+</html>
